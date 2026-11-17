@@ -15,7 +15,8 @@
     "vapid": "node -e \"const k=require('web-push').generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey+'\\nVAPID_PRIVATE_KEY='+k.privateKey)\"",
     "build:mobile": "node scripts/build-mobile.js",
     "android": "npm run build:mobile && npx cap open android",
-    "ios": "npm run build:mobile && npx cap open ios"
+    "ios": "npm run build:mobile && npx cap open ios",
+    "demo": "node --no-warnings=ExperimentalWarning scripts/demo.js"
   },
   "dependencies": {
     "express": "^5.1.0",

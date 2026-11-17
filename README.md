@@ -22,6 +22,28 @@ The layout adapts to the screen: bottom tabs on phones, a roomier layout on tabl
 
 Rules built in: one amenity slot per flat per day, no double booking, gate passes work once and only on their date, and residents only ever see their own flat's visitors.
 
+## Try it on your laptop (demo with sample data)
+
+1. Install **Node.js 22 LTS** or newer from [nodejs.org](https://nodejs.org) (the default options are fine).
+2. Get the code: on GitHub, switch to this branch, then **Code → Download ZIP**, and unzip it. Or use `git clone`.
+3. Open a terminal in the unzipped folder (Windows: right-click the folder → *Open in Terminal*) and run:
+   ```bash
+   npm install
+   npm run demo
+   ```
+4. Open **http://localhost:3000** and sign in:
+
+   | Role | Phone | Password |
+   |---|---|---|
+   | Committee admin | 9000000000 | admin123 |
+   | Resident (A-101) | 9811111111 | demo123 |
+   | Resident (B-205) | 9822222222 | demo123 |
+   | Security guard | 9333333333 | guard123 |
+
+   To see the live gate flow, sign in as the **guard** in one window and as **Priya** in an incognito window, then log a visitor for A-101. To see the phone layout, press F12 and toggle the device toolbar (Ctrl+Shift+M).
+
+The demo resets every time it starts and never touches real data. Press Ctrl+C to stop.
+
 ## Run it locally
 
 Needs Node.js 22.13 or newer.
