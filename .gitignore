@@ -3,3 +3,5 @@ data/
 .env
 *.db
 *.db-*
+www/
+secrets/

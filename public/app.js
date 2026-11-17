@@ -1,6 +1,33 @@
 /* Gatepass front-end: a small hash-routed single page app, no framework. */
 'use strict';
 
+// ---------- Platform ----------
+// Same code runs as a website/PWA and inside the Capacitor Android/iOS apps.
+const Cap = window.Capacitor;
+const NATIVE = Boolean(Cap?.isNativePlatform?.());
+const PLATFORM = Cap?.getPlatform?.() || 'web';
+const Plugins = Cap?.Plugins || {};
+// In the native apps the pages are bundled, so API calls go to the society's server (set at build time in config.js).
+const API_BASE = NATIVE ? String(window.GATEPASS_SERVER || '').replace(/\/$/, '') : '';
+document.documentElement.classList.add(`platform-${PLATFORM}`);
+
+// Native apps keep the session token in secure-ish app storage (web uses an HttpOnly cookie instead).
+const tokenStore = {
+  value: null,
+  async load() {
+    if (!NATIVE) return;
+    try { this.value = (await Plugins.Preferences?.get({ key: 'gp_token' }))?.value || localStorage.getItem('gp_token'); } catch { this.value = null; }
+  },
+  async set(v) {
+    this.value = v;
+    if (!NATIVE) return;
+    try {
+      if (v) { await Plugins.Preferences?.set({ key: 'gp_token', value: v }); localStorage.setItem('gp_token', v); }
+      else { await Plugins.Preferences?.remove({ key: 'gp_token' }); localStorage.removeItem('gp_token'); }
+    } catch { /* storage unavailable */ }
+  },
+};
+
 // ---------- Helpers ----------
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -21,14 +48,18 @@ function html(strings, ...vals) {
 }
 
 async function api(method, url, body) {
-  const res = await fetch(`/api${url}`, {
-    method,
-    headers: body ? { 'content-type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-    credentials: 'same-origin',
-  });
+  const headers = body ? { 'content-type': 'application/json' } : {};
+  if (tokenStore.value) headers.authorization = `Bearer ${tokenStore.value}`;
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/api${url}`, {
+      method, headers, body: body ? JSON.stringify(body) : undefined, credentials: NATIVE ? 'omit' : 'same-origin',
+    });
+  } catch {
+    throw new Error(navigator.onLine === false ? "You're offline. Check your internet connection." : "Can't reach the society server. Try again in a moment.");
+  }
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && state.user) { state.user = null; go('/login'); }
+  if (res.status === 401 && state.user) { state.user = null; await tokenStore.set(null); go('/login'); }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
@@ -55,7 +86,7 @@ const todayYMD = (offset = 0) => {
   const d = new Date(); d.setDate(d.getDate() + offset);
   return d.toLocaleDateString('en-CA');
 };
-const initials = (n) => String(n || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+const initials = (n) => (String(n || '').match(/\p{L}[\p{L}\p{M}]*/gu) || ['?']).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 const addMin = (hhmm, m) => { const [h, mm] = hhmm.split(':').map(Number); const t = h * 60 + mm + m; return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; };
 const fmtHM = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return `${((h + 11) % 12) + 1}${m ? `:${String(m).padStart(2, '0')}` : ''} ${h < 12 ? 'am' : 'pm'}`; };
 
@@ -99,6 +130,7 @@ async function render() {
   state.refresh = null;
   renderChrome(r.tab);
   const view = $('#view');
+  view.classList.toggle('narrow', Boolean(r.narrow));
   try {
     const out = await r.view(params);
     if (out === undefined) return; // view redirected
@@ -121,7 +153,7 @@ function renderChrome(activeTab) {
   const tabs = u.role === 'guard'
     ? [['/guard', 'shield', 'Gate'], ['/guard/log', 'list', 'Log'], ['/community', 'chat', 'Notices'], ['/more', 'more', 'More']]
     : [['/', 'home', 'Home'], ['/gate', 'gate', 'Visitors'], ['/community', 'chat', 'Community'], ['/amenities', 'calendar', 'Amenities'], ['/more', 'more', 'More']];
-  $('#tabbar').innerHTML = tabs.map(([href, ic, label]) => html`
+  $('#tabbar').innerHTML = html`<div class="side-brand"><img src="/icons/icon.svg" alt=""><span>${state.config.society || 'Gatepass'}</span></div>`.toString() + tabs.map(([href, ic, label]) => html`
     <a href="#${href}" class="${activeTab === href ? 'active' : ''}">${icon(ic)}${label}
       ${href === '/' && state.pendingCount ? html`<span class="dot">${state.pendingCount}</span>` : ''}</a>`).join('');
 }
@@ -167,7 +199,7 @@ actions.back = () => history.back();
 let events;
 function connectEvents() {
   events?.close();
-  events = new EventSource('/api/events');
+  events = new EventSource(`${API_BASE}/api/events${tokenStore.value ? `?token=${tokenStore.value}` : ''}`);
   events.addEventListener('visitor', (e) => {
     const v = JSON.parse(e.data);
     if (state.user.role !== 'guard' && v.status === 'pending') {
@@ -215,8 +247,9 @@ route('/login', async () => html`
   </div>`, { public: true });
 
 forms.login = async (d) => {
-  await api('POST', '/auth/login', d);
-  await boot();
+  const r = await api('POST', '/auth/login', { ...d, native: NATIVE });
+  if (NATIVE) await tokenStore.set(r.token);
+  await tokenStore.load().then(boot);
 };
 
 route('/register', async () => {
@@ -251,7 +284,8 @@ forms.register = async (d, form) => {
 
 actions.logout = async () => {
   await disablePush().catch(() => {});
-  await api('POST', '/auth/logout', {});
+  await api('POST', '/auth/logout', {}).catch(() => {});
+  await tokenStore.set(null);
   state.user = null;
   events?.close();
   go('/login');
@@ -313,14 +347,20 @@ route('/', async () => {
       <a href="#/amenities">${icon('calendar')}Book amenity</a>
       <a href="#/helpdesk">${icon('wrench')}Raise issue</a>
     </div>
+    <div class="split">
+    <section>
     <h2>At the gate</h2>
     <div id="home-active">${active}</div>
     ${bookings.length ? html`<h2>Your bookings</h2><div class="card"><ul class="list">
       ${bookings.slice(0, 3).map((b) => html`<li class="row between"><span><span class="title">${b.amenity}</span><br><span class="meta">${fmtDay(b.date)} · ${fmtHM(b.start_time)}–${fmtHM(addMin(b.start_time, b.slot_minutes))}</span></span></li>`)}
     </ul></div>` : ''}
+    </section>
+    <section>
     <h2>Notices</h2>
     ${posts.length ? posts.slice(0, 3).map(postCard) : html`<div class="card empty">No notices yet.</div>`}
-    ${posts.length > 3 ? html`<p class="center"><a href="#/community">All notices</a></p>` : ''}`;
+    ${posts.length > 3 ? html`<p class="center"><a href="#/community">All notices</a></p>` : ''}
+    </section>
+    </div>`;
 }, { tab: '/', keepScroll: false });
 
 // ---------- Resident: Visitors / gate passes ----------
@@ -328,7 +368,7 @@ route('/gate', async () => {
   const [passes, log] = await Promise.all([api('GET', '/passes'), api('GET', `/visitors?days=7&mine=1`)]);
   return html`
     <div class="row between"><h1>Visitors</h1><a class="btn sm" href="#/gate/invite">${icon('plus')} Invite guest</a></div>
-    ${passes.length ? html`<h2>Gate passes</h2>${passes.map(passCard)}` : ''}
+    ${passes.length ? html`<h2>Gate passes</h2><div class="card-grid">${passes.map(passCard)}</div>` : ''}
     <h2>Last 7 days</h2>
     ${log.length ? html`<div class="card"><ul class="list">${log.map((v) => html`
       <li class="row">
@@ -364,7 +404,7 @@ route('/gate/invite', async () => html`
     <div class="error"></div>
     <button class="btn block lg" type="submit">Create gate pass</button>
   </form>
-  <div id="new-pass"></div>`, { tab: '/gate' });
+  <div id="new-pass"></div>`, { tab: '/gate', narrow: true });
 
 forms.invite = async (d, form) => {
   const p = await api('POST', '/passes', d);
@@ -376,7 +416,9 @@ forms.invite = async (d, form) => {
 actions.sharePass = async ({ code, name, date }) => {
   const when = date === todayYMD() ? 'today' : `on ${fmtDay(date)}`;
   const text = `Hi ${name}, your gate pass for ${state.config.society || 'our society'} (${state.user.flat}) ${when} is ${code}. Show this code to security at the gate.`;
-  if (navigator.share) {
+  if (Plugins.Share) {
+    await Plugins.Share.share({ text, dialogTitle: 'Share gate pass' }).catch(() => {});
+  } else if (navigator.share) {
     await navigator.share({ text }).catch(() => {});
   } else {
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
@@ -409,7 +451,7 @@ route('/community/:kind', async ({ kind }) => {
       <a href="#/community/notice" class="${kind === 'notice' ? 'active' : ''}">Notices</a>
       ${state.user.role === 'guard' ? '' : html`<a href="#/community/discussion" class="${kind === 'discussion' ? 'active' : ''}">Discussions</a>`}
     </div>
-    ${posts.length ? posts.map(postCard) : html`<div class="card empty">${kind === 'notice' ? 'No notices yet.' : 'No discussions yet. Start one!'}</div>`}
+    ${posts.length ? html`<div class="card-grid">${posts.map(postCard)}</div>` : html`<div class="card empty">${kind === 'notice' ? 'No notices yet.' : 'No discussions yet. Start one!'}</div>`}
     ${canPost ? html`<a class="btn fab" href="#/new-post/${kind}">${icon('plus')} New ${kind === 'notice' ? 'notice' : 'post'}</a>` : ''}`;
 }, { tab: '/community' });
 
@@ -425,7 +467,7 @@ route('/new-post/:kind', async ({ kind }) => html`
     ${kind === 'notice' ? html`<p class="hint">Everyone gets a notification for notices.</p>` : ''}
     <div class="error"></div>
     <button class="btn block lg" type="submit">Post</button>
-  </form>`, { tab: '/community', roles: ['resident', 'admin'] });
+  </form>`, { tab: '/community', roles: ['resident', 'admin'], narrow: true });
 
 forms.post = async (d) => { const r = await api('POST', '/posts', d); go(`/post/${r.id}`); };
 
@@ -460,7 +502,7 @@ route('/post/:id', async ({ id }) => {
         <div class="error"></div>
         <button class="btn block" type="submit">Send reply</button>
       </form>` : ''}`;
-}, { tab: '/community' });
+}, { tab: '/community', narrow: true });
 
 forms.comment = async (d) => { await api('POST', `/posts/${d.post_id}/comments`, { body: d.body }); render(); };
 actions.deletePost = async ({ id, kind }) => { await api('DELETE', `/posts/${id}`); toast('Deleted'); go(`/community/${kind}`); };
@@ -472,12 +514,12 @@ route('/amenities', async () => {
   const [list, mine] = await Promise.all([api('GET', '/amenities'), api('GET', '/bookings')]);
   return html`
     <h1>Amenities</h1>
-    ${list.length ? list.map((a) => html`
+    ${list.length ? html`<div class="card-grid">${list.map((a) => html`
       <a class="card card-link" href="#/amenity/${a.id}">
         <div class="row between"><span class="title">${a.name}</span><span class="meta">›</span></div>
         ${a.description ? html`<p class="muted small">${a.description}</p>` : ''}
         <div class="meta">${fmtHM(a.open_time)}–${fmtHM(a.close_time)} · ${a.slot_minutes} min slots</div>
-      </a>`) : html`<div class="card empty">The committee hasn't added any amenities yet.</div>`}
+      </a>`)}</div>` : html`<div class="card empty">The committee hasn't added any amenities yet.</div>`}
     <h2>Your upcoming bookings</h2>
     ${mine.length ? html`<div class="card"><ul class="list">${mine.map((b) => html`
       <li class="row">
@@ -538,7 +580,7 @@ route('/helpdesk', async () => {
     </form>
     <h2>Your flat's requests</h2>
     ${list.length ? list.map(complaintCard) : html`<div class="card empty">Nothing raised yet.</div>`}`;
-}, { tab: '/more', roles: ['resident', 'admin'] });
+}, { tab: '/more', roles: ['resident', 'admin'], narrow: true });
 
 function complaintCard(c, admin = false) {
   return html`
@@ -563,10 +605,11 @@ forms.complaint = async (d, form) => { await api('POST', '/complaints', d); form
 
 // ---------- More / account ----------
 route('/more', async () => {
-  const pushOk = 'serviceWorker' in navigator && 'PushManager' in window && state.config.pushKey;
+  const pushOk = !NATIVE && 'serviceWorker' in navigator && 'PushManager' in window && state.config.pushKey;
   const sub = pushOk ? await navigator.serviceWorker.ready.then((r) => r.pushManager.getSubscription()).catch(() => null) : null;
   const isIOS = /iphone|ipad/i.test(navigator.userAgent);
-  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  const standalone = NATIVE || matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  const nativePerm = NATIVE && Plugins.PushNotifications ? (await Plugins.PushNotifications.checkPermissions().catch(() => ({}))).receive : null;
   return html`
     <h1>More</h1>
     <div class="card"><ul class="list">
@@ -575,7 +618,12 @@ route('/more', async () => {
     </ul></div>
     <h2>Notifications</h2>
     <div class="card">
-      ${!state.config.pushKey ? html`<p class="muted small">Phone notifications aren't set up on this server yet. You'll still see alerts while the app is open.</p>`
+      ${NATIVE ? (!state.config.nativePush?.[PLATFORM] || !Plugins.PushNotifications
+          ? html`<p class="muted small">Phone notifications aren't set up on the server yet. You'll still see alerts while the app is open.</p>`
+          : nativePerm === 'granted' ? html`<p class="small">✅ Notifications are on for this phone.</p>`
+          : nativePerm === 'denied' ? html`<p class="small">Notifications are blocked. Turn them on for Gatepass in your phone's Settings.</p>`
+          : html`<p class="small">Get alerted when a visitor is at the gate, even when the app is closed.</p><button class="btn" data-action="nativePushOn">Turn on notifications</button>`)
+        : !state.config.pushKey ? html`<p class="muted small">Phone notifications aren't set up on this server yet. You'll still see alerts while the app is open.</p>`
         : isIOS && !standalone ? html`<p class="small">On iPhone, first tap <b>Share → Add to Home Screen</b>, then open Gatepass from your home screen to turn on notifications.</p>`
         : !pushOk ? html`<p class="muted small">This browser doesn't support notifications.</p>`
         : sub ? html`<p class="small">✅ Notifications are on for this device.</p><button class="btn sm ghost" data-action="pushOff">Turn off</button>`
@@ -596,7 +644,7 @@ route('/more', async () => {
     </div>
     <button class="btn ghost block" data-action="logout">Sign out</button>
     ${!standalone ? html`<p class="hint center">Tip: add Gatepass to your home screen for one-tap access.</p>` : ''}`;
-}, { tab: '/more' });
+}, { tab: '/more', narrow: true });
 
 forms.password = async (d, form) => { await api('POST', '/me/password', d); form.reset(); toast('Password changed'); };
 
@@ -614,7 +662,56 @@ actions.pushOn = async () => {
   toast('Notifications on');
   render();
 };
+// ---- Native (Android/iOS) push via Firebase Cloud Messaging ----
+let nativePushToken = null;
+async function registerNativePush({ prompt = false } = {}) {
+  const PN = Plugins.PushNotifications;
+  if (!NATIVE || !PN || !state.config.nativePush?.[PLATFORM]) return;
+  let perm = await PN.checkPermissions();
+  if (perm.receive === 'prompt' || perm.receive === 'prompt-with-rationale') {
+    if (!prompt) return;
+    perm = await PN.requestPermissions();
+  }
+  if (perm.receive !== 'granted') {
+    if (prompt) throw new Error("Notifications are off. Turn them on for Gatepass in your phone's Settings.");
+    return;
+  }
+  if (PLATFORM === 'android') {
+    await PN.createChannel({ id: 'gate', name: 'Gate alerts', description: 'Visitors at the gate', importance: 5, visibility: 1, vibration: true }).catch(() => {});
+  }
+  await PN.register();
+}
+function setupNativeListeners() {
+  if (!NATIVE) return;
+  const PN = Plugins.PushNotifications;
+  PN?.addListener('registration', async ({ value }) => {
+    nativePushToken = value;
+    if (state.user) await api('POST', '/push/native', { token: value, platform: PLATFORM }).catch(() => {});
+  });
+  PN?.addListener('pushNotificationActionPerformed', ({ notification }) => {
+    const url = notification?.data?.url || '/';
+    location.hash = url.replace(/^\/?#?/, '#').replace(/^#$/, '#/');
+  });
+  // Foreground pushes: the live stream already shows a toast; just refresh what's on screen.
+  PN?.addListener('pushNotificationReceived', () => state.refresh?.());
+  Plugins.App?.addListener('backButton', ({ canGoBack }) => {
+    const root = ['/', '/guard', '/login', ''].includes(location.hash.slice(1));
+    if (canGoBack && !root) history.back(); else Plugins.App.exitApp();
+  });
+  Plugins.App?.addListener('resume', () => {
+    if (!state.user) return;
+    if (!events || events.readyState === 2) connectEvents();
+    updatePendingCount().then(() => renderChrome(currentTab()));
+    state.refresh?.();
+  });
+}
+actions.nativePushOn = async () => { await registerNativePush({ prompt: true }); toast('Notifications on'); setTimeout(render, 500); };
+
 async function disablePush() {
+  if (NATIVE) {
+    if (nativePushToken) await api('POST', '/push/native/remove', { token: nativePushToken }).catch(() => {});
+    return;
+  }
   const reg = await navigator.serviceWorker?.ready;
   const sub = await reg?.pushManager?.getSubscription();
   if (sub) { await api('POST', '/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
@@ -652,7 +749,8 @@ route('/guard', async () => {
   state.refresh = () => refreshRegion('guard-lists', guardLists);
   const mode = sessionStorage.getItem('guard-mode') || 'new';
   return html`
-  <div class="guard">
+  <div class="guard split">
+    <section class="sticky-col">
     <div class="seg">
       <button class="${mode === 'new' ? 'active' : ''}" data-action="guardMode" data-mode="new">New visitor</button>
       <button class="${mode === 'code' ? 'active' : ''}" data-action="guardMode" data-mode="code">Gate pass code</button>
@@ -683,7 +781,8 @@ route('/guard', async () => {
       <div class="error"></div>
       <button class="btn block lg" type="submit">Verify & let in</button>
     </form>`}
-    <div id="guard-lists">${lists}</div>
+    </section>
+    <section id="guard-lists">${lists}</section>
   </div>`;
 }, { tab: '/guard', roles: ['guard', 'admin'] });
 
@@ -770,14 +869,14 @@ route('/admin', async () => {
       <a class="stat" href="#/admin/bookings"><b>${s.bookings_today}</b><span>Bookings today</span></a>
     </div>
     <h2>Waiting for approval ${pending.length ? html`<span class="badge warn">${pending.length}</span>` : ''}</h2>
-    ${pending.length ? pending.map((u) => html`
+    ${pending.length ? html`<div class="card-grid">${pending.map((u) => html`
       <div class="card">
         <div class="row between"><div><div class="title">${u.name} · ${u.flat}</div><div class="meta">${u.phone} · signed up ${ago(u.created_at)}</div></div></div>
         <div class="btns">
           <button class="btn ok" data-action="userSet" data-id="${u.id}" data-status="active">Approve</button>
           <button class="btn ghost" data-action="rejectUser" data-id="${u.id}" data-confirm="Reject ${u.name}'s sign-up?">Reject</button>
         </div>
-      </div>`) : html`<div class="card empty">No pending sign-ups.</div>`}
+      </div>`)}</div>` : html`<div class="card empty">No pending sign-ups.</div>`}
     ${s.flats === 0 ? html`<div class="card alert"><b>Start here:</b> add your society's flats under <a href="#/admin/flats">Flats</a>, then add guards under <a href="#/admin/users">People</a>.</div>` : ''}
     <h2>Quick links</h2>
     <div class="btns">
@@ -904,7 +1003,7 @@ route('/admin/complaints', async () => {
   const list = await api('GET', '/complaints?all=1');
   state.refresh = () => { if (!document.activeElement?.closest('form')) render(); };
   return html`<h1>Helpdesk</h1>${adminNav('complaints')}
-    ${list.length ? list.map((c) => complaintCard(c, true)) : html`<div class="card empty">No issues raised.</div>`}`;
+    ${list.length ? html`<div class="card-grid">${list.map((c) => complaintCard(c, true))}</div>` : html`<div class="card empty">No issues raised.</div>`}`;
 }, { tab: '/more', roles: ['admin'] });
 
 forms.updateComplaint = async (d) => { await api('PATCH', `/complaints/${d.id}`, { status: d.status, admin_note: d.admin_note }); toast('Updated'); render(); };
@@ -921,11 +1020,16 @@ route('/admin/bookings', async () => {
 
 // ---------- Boot ----------
 async function boot() {
+  if (NATIVE && !API_BASE) {
+    $('#view').innerHTML = '<div class="card"><p class="error">This app was built without a server address. Rebuild with GATEPASS_SERVER_URL set.</p></div>';
+    return;
+  }
   state.config = await api('GET', '/config').catch(() => ({}));
   document.title = state.config.society || 'Gatepass';
   try { state.user = await api('GET', '/me'); } catch { state.user = null; }
   if (state.user) {
     connectEvents();
+    registerNativePush().catch(() => {});
     await updatePendingCount();
     if (['/login', '/register', ''].includes(location.hash.slice(1))) {
       location.hash = state.user.role === 'guard' ? '#/guard' : '#/';
@@ -934,7 +1038,8 @@ async function boot() {
   render();
 }
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+setupNativeListeners();
 // When the app comes back to the foreground, refresh what's on screen.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.user) {
@@ -942,4 +1047,4 @@ document.addEventListener('visibilitychange', () => {
     state.refresh?.();
   }
 });
-boot();
+tokenStore.load().then(boot);

@@ -1,0 +1,20 @@
+{
+  "appId": "com.gatepass.society",
+  "appName": "Gatepass",
+  "webDir": "www",
+  "backgroundColor": "#0f5b52",
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "never"
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "SystemBars": {
+      "insetsHandling": "css"
+    }
+  }
+}

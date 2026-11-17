@@ -153,3 +153,40 @@ test('disabled users are logged out immediately', async () => {
   await admin('PATCH', `/api/admin/users/${bobId}`, { status: 'disabled' });
   assert.equal((await bob('GET', '/api/me')).status, 401);
 });
+
+test('native apps: bearer token login, CORS preflight and token-authenticated SSE', async () => {
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json', origin: 'capacitor://localhost' },
+    body: JSON.stringify({ phone: '9111111111', password: 'secret1', native: true }),
+  });
+  assert.equal(login.headers.get('access-control-allow-origin'), 'capacitor://localhost');
+  const { token } = await login.json();
+  assert.match(token, /^[a-f0-9]{64}$/);
+
+  const web = await (await fetch(`${base}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone: '9111111111', password: 'secret1' }),
+  })).json();
+  assert.equal(web.token, undefined, 'web login never exposes the token to JavaScript');
+
+  const pre = await fetch(`${base}/api/me`, { method: 'OPTIONS', headers: { origin: 'https://localhost', 'access-control-request-headers': 'authorization' } });
+  assert.equal(pre.status, 204);
+  const evil = await fetch(`${base}/api/me`, { headers: { origin: 'https://evil.example', authorization: `Bearer ${token}` } });
+  assert.equal(evil.headers.get('access-control-allow-origin'), null, 'unknown origins get no CORS headers');
+
+  const me = await (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${token}` } })).json();
+  assert.equal(me.name, 'Alice');
+  assert.equal((await fetch(`${base}/api/me?token=${token}`)).status, 401, 'query token only accepted for the event stream');
+
+  const ctrl = new AbortController();
+  const sse = await fetch(`${base}/api/events?token=${token}`, { signal: ctrl.signal });
+  assert.equal(sse.status, 200);
+  assert.match(sse.headers.get('content-type'), /text\/event-stream/);
+  ctrl.abort();
+
+  const reg = await fetch(`${base}/api/push/native`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ token: 'fcm-device-token-123', platform: 'android' }),
+  });
+  assert.equal(reg.status, 200);
+  assert.equal(db.get('SELECT platform FROM native_push_tokens WHERE token = ?', 'fcm-device-token-123').platform, 'android');
+});

@@ -1,10 +1,16 @@
-// Delivers events to users two ways:
-//  1. Server-Sent Events to any open app tab (instant, no setup).
-//  2. Web Push to installed phones (works with the app closed) when VAPID keys are configured.
+// Delivers events to users:
+//  1. Server-Sent Events to any open app screen (instant, no setup).
+//  2. Web Push to the installed website/PWA, when VAPID keys are configured.
+//  3. Native push to the Android app (Firebase) and iOS app (Apple APNs), when configured.
+const { createFcm } = require('./fcm');
+const { createApns } = require('./apns');
+
 let webpush = null;
 
 function createNotifier(db) {
   const streams = new Map(); // userId -> Set<res>
+  const fcm = createFcm();
+  const apns = createApns();
   const pushEnabled = Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY);
   if (pushEnabled) {
     webpush = require('web-push');
@@ -32,6 +38,7 @@ function createNotifier(db) {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data ?? {})}\n\n`);
       }
       if (push && pushEnabled) sendPush(id, push);
+      if (push && (fcm || apns)) sendNative(id, push);
     }
   }
 
@@ -48,6 +55,17 @@ function createNotifier(db) {
     }
   }
 
+  function sendNative(userId, payload) {
+    for (const { token, platform } of db.all('SELECT token, platform FROM native_push_tokens WHERE user_id = ?', userId)) {
+      // iOS devices register an APNs token; Android registers an FCM token.
+      const sender = platform === 'ios' ? (apns || null) : fcm;
+      if (!sender) continue;
+      sender.send(token, payload)
+        .then((valid) => { if (!valid) db.run('DELETE FROM native_push_tokens WHERE token = ?', token); })
+        .catch((err) => console.error(`Push to ${platform} failed:`, err.message));
+    }
+  }
+
   const residentsOf = (flatId) =>
     db.all("SELECT id FROM users WHERE flat_id = ? AND status = 'active'", flatId).map((r) => r.id);
   const guards = () =>
@@ -57,7 +75,7 @@ function createNotifier(db) {
 
   return {
     subscribe, toUsers, residentsOf, guards, admins,
-    pushEnabled, publicKey: process.env.VAPID_PUBLIC_KEY || null,
+    pushEnabled, nativePushEnabled: { android: Boolean(fcm), ios: Boolean(apns) }, publicKey: process.env.VAPID_PUBLIC_KEY || null,
   };
 }
 

@@ -25,6 +25,25 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
     next();
   });
 
+  // CORS for the native Android/iOS apps (their pages are served from capacitor://localhost or https://localhost).
+  // They authenticate with a bearer token, never cookies, so allowing these origins does not expose cookie sessions.
+  const corsOrigins = new Set(['capacitor://localhost', 'https://localhost', 'http://localhost',
+    ...(process.env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean)]);
+  app.use('/api', (req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && corsOrigins.has(origin)) {
+      res.set({
+        'Access-Control-Allow-Origin': origin,
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Max-Age': '86400',
+        Vary: 'Origin',
+      });
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+    }
+    next();
+  });
+
   // CSRF defence: state-changing API calls must be JSON (browsers can't send that cross-site without CORS).
   app.use('/api', (req, res, next) => {
     if (!['GET', 'HEAD', 'DELETE'].includes(req.method) && !req.is('application/json')) {
@@ -37,7 +56,12 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
   const cookieName = 'gp_session';
   const secureCookie = process.env.COOKIE_SECURE === '1';
 
+  // Web uses an HttpOnly cookie; the native apps send "Authorization: Bearer <token>".
+  // EventSource can't set headers, so the live-updates stream also accepts ?token=.
   function readToken(req) {
+    const bearer = (req.headers.authorization || '').match(/^Bearer ([a-f0-9]{64})$/);
+    if (bearer) return bearer[1];
+    if (req.path === '/events' && /^[a-f0-9]{64}$/.test(req.query.token || '')) return req.query.token;
     const m = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${cookieName}=([a-f0-9]{64})`));
     return m ? m[1] : null;
   }
@@ -48,6 +72,7 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
     db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', token, userId, expires.toISOString());
     res.setHeader('Set-Cookie',
       `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${secureCookie ? '; Secure' : ''}`);
+    return token;
   }
 
   app.use('/api', (req, res, next) => {
@@ -84,6 +109,7 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
     res.json({
       society: process.env.SOCIETY_NAME || 'Our Society',
       pushKey: notify.publicKey,
+      nativePush: notify.nativePushEnabled,
     });
   });
 
@@ -100,8 +126,9 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
     if (u.status === 'pending') throw new HttpError(403, 'Your account is waiting for approval by the committee');
     if (u.status === 'disabled') throw new HttpError(403, 'Your account has been disabled');
     attempts.delete(`${req.ip}|${phone}`);
-    startSession(res, u.id);
-    res.json({ ok: true });
+    const token = startSession(res, u.id);
+    // Native apps ask for the token in the body (they can't use the cookie); the web never receives it.
+    res.json(req.body.native ? { ok: true, token } : { ok: true });
   });
 
   app.post('/api/auth/register', (req, res) => {
@@ -163,6 +190,20 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
 
   app.post('/api/push/unsubscribe', auth(), (req, res) => {
     db.run('DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?', String(req.body?.endpoint || ''), req.user.id);
+    res.json({ ok: true });
+  });
+
+  // Native app push (Firebase Cloud Messaging covers both Android and iOS).
+  app.post('/api/push/native', auth(), (req, res) => {
+    const token = str(req.body, 'token', { max: 4096 });
+    const platform = ['android', 'ios'].includes(req.body.platform) ? req.body.platform : 'android';
+    db.run(`INSERT INTO native_push_tokens (token, user_id, platform) VALUES (?, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id, platform = excluded.platform`, token, req.user.id, platform);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/push/native/remove', auth(), (req, res) => {
+    db.run('DELETE FROM native_push_tokens WHERE token = ? AND user_id = ?', String(req.body?.token || ''), req.user.id);
     res.json({ ok: true });
   });
 
