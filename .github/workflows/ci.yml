@@ -27,6 +27,13 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    env:
+      KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'gatepass' }}
+      # Ever-increasing version so each APK installs over the previous one.
+      GATEPASS_VERSION_CODE: ${{ github.run_number }}
+      GATEPASS_VERSION_NAME: 1.0.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,13 +42,36 @@ jobs:
         with: { distribution: temurin, java-version: 21, cache: gradle }
       - run: npm ci
       - run: npm run build:mobile
-      - name: Build debug APK
+      - name: Set up signing key
+        id: key
+        run: |
+          ks="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$ks"
+            echo "name=gatepass-android" >> "$GITHUB_OUTPUT"
+          else
+            # No society key configured yet: sign with a throwaway key so the release build is still verified.
+            # This APK can't be updated by later builds, so don't give it to residents.
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret not set. Building with a throwaway TEST key; see README → Signing key."
+            export ANDROID_KEYSTORE_PASSWORD=test-only-password ANDROID_KEY_ALIAS=gatepass
+            keytool -genkeypair -noprompt -storetype PKCS12 -keystore "$ks" -alias gatepass -keyalg RSA -keysize 2048 \
+              -validity 30 -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEYSTORE_PASSWORD" -dname "CN=Test key"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "name=gatepass-android-TEST-KEY-do-not-distribute" >> "$GITHUB_OUTPUT"
+          fi
+          echo "ANDROID_KEYSTORE_FILE=$ks" >> "$GITHUB_ENV"
+      - name: Build signed release APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleRelease --no-daemon
+      - name: Verify signature
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME"/build-tools/$(ls "$ANDROID_HOME"/build-tools | sort -V | tail -1)/apksigner verify --print-certs "$apk" | grep -i "SHA-256"
+          mkdir -p dist && cp "$apk" dist/gatepass.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: gatepass-android-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: ${{ steps.key.outputs.name }}
+          path: dist/gatepass.apk
 
   ios:
     runs-on: macos-15

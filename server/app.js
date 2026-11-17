@@ -1,3 +1,4 @@
+const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const express = require('express');
@@ -10,6 +11,9 @@ const SESSION_DAYS = 60;
 function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'gatepass.db') } = {}) {
   const db = open(dbFile);
   const notify = createNotifier(db);
+  // Optional Android app download: put the signed APK at data/gatepass.apk (or set APK_FILE).
+  const dataDir = dbFile === ':memory:' ? path.join(__dirname, '..', 'data') : path.dirname(dbFile);
+  const apkFile = process.env.APK_FILE || path.join(dataDir, 'gatepass.apk');
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -110,6 +114,7 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
       society: process.env.SOCIETY_NAME || 'Our Society',
       pushKey: notify.publicKey,
       nativePush: notify.nativePushEnabled,
+      androidApp: fs.existsSync(apkFile),
     });
   });
 
@@ -217,10 +222,21 @@ function createApp({ dbFile = process.env.DB_FILE || path.join(__dirname, '..', 
 
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
+  // ---- Android app download ----
+  app.get('/download/gatepass.apk', (req, res) => {
+    if (!fs.existsSync(apkFile)) return res.status(404).send('The Android app has not been uploaded to this server yet.');
+    res.set('Cache-Control', 'no-cache');
+    res.download(apkFile, `${(process.env.SOCIETY_NAME || 'Gatepass').replace(/[^\w-]+/g, '-')}.apk`, {
+      headers: { 'Content-Type': 'application/vnd.android.package-archive' },
+    });
+  });
+
   // ---- Static front-end ----
+  // Screens (HTML/JS/CSS) are revalidated on every load, so updates reach browsers and the
+  // live-mode phone apps immediately. Unchanged files still come back as a cheap 304.
   app.use(express.static(path.join(__dirname, '..', 'public'), {
     setHeaders: (res, file) => {
-      if (file.endsWith('sw.js') || file.endsWith('.html')) res.set('Cache-Control', 'no-cache');
+      if (/\.(html|js|css|webmanifest)$/.test(file)) res.set('Cache-Control', 'no-cache');
     },
   }));
   app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));

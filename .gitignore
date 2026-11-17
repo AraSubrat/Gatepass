@@ -5,3 +5,6 @@ data/
 *.db-*
 www/
 secrets/
+android/keystore.properties
+*.keystore
+*.jks

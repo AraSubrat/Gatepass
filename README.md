@@ -56,24 +56,42 @@ Put it behind Caddy for automatic HTTPS (`gate.yoursociety.in { reverse_proxy lo
 
 ## Android and iOS apps
 
-The `android/` and `ios/` folders are native projects that bundle the same screens. The apps talk to your server over HTTPS and log in with a token, since apps can't use browser cookies. Native features used: the push notifications, the share sheet (for gate passes), the Android back button and secure app storage for the login.
+The `android/` and `ios/` folders are native app projects built from the same code.
+
+### Updates reach every phone automatically ("live" mode, the default)
+
+The apps load their screens from your server each time they open, so **any change deployed to the server reaches every resident's phone at once**, with no reinstall and no store review. All residents always share the same data, because everything lives on the one server.
+
+- If there's no internet, the app shows a built-in "Can't connect right now" screen and reconnects by itself.
+- You only need a new APK for changes to the native shell itself: a new app icon, a new native feature or a new app ID. That's rare.
+- Prefer screens packed inside the app? Set `GATEPASS_APP_MODE=bundled`. Updates then need a new build.
+- Note: Apple may reject live-mode apps from the *public* App Store. Use TestFlight or a private (custom) app for iPhones, or bundled mode for a public listing.
 
 ### Build them
 
 ```bash
-GATEPASS_SERVER_URL=https://gate.yoursociety.in npm run build:mobile   # bundle + sync both apps
-npx cap open android     # opens Android Studio → Run ▶ on a phone, or Build → Generate Signed APK/Bundle
-npx cap open ios         # opens Xcode (needs a Mac) → pick your team → Run ▶ or Product → Archive
+GATEPASS_SERVER_URL=https://gate.yoursociety.in npm run build:mobile   # prepare + sync both apps
+npx cap open android     # Android Studio → Build → Generate Signed APK (use the key below)
+npx cap open ios         # Xcode (Mac) → pick your team → Run ▶ or Product → Archive
 ```
 
-Requirements: Android Studio (Java 21) for Android, and a Mac with Xcode 16+ for iOS.
+**No Mac or Android Studio needed for Android:** every push to GitHub runs `.github/workflows/ci.yml`. It runs the tests, builds a **signed Android APK** (download it from the run's *Artifacts*) and checks that the iOS app compiles. Set the repository variable `GATEPASS_SERVER_URL` first.
 
-**No Mac or Android Studio?** Every push to GitHub runs `.github/workflows/ci.yml`. It runs the tests, builds an **Android APK** you can download from the run's *Artifacts* and install on any Android phone, and checks that the iOS app compiles. Set the repository variable `GATEPASS_SERVER_URL` so the APK points at your server.
+### Signing key (Android)
 
-Before publishing:
-1. **Change the app ID** `com.gatepass.society` in `capacitor.config.json` to your own, such as `in.greenmeadows.gate`. Then also change it in Android Studio (applicationId) and Xcode (Bundle Identifier).
-2. **Icons and splash**: edit `resources/icon.svg`, then run `node scripts/make-native-assets.js`.
-3. **Stores**: Google Play needs a one-time $25 developer account, and the App Store needs $99/year. If you'd rather not publish publicly, share the APK directly or use a Play Console *internal testing* track. For iPhones, *TestFlight* or Apple Business Manager *custom apps* work for a private society app.
+Every version of the Android app must be signed with **the same key**. Otherwise phones refuse to install updates, and residents would have to uninstall first.
+
+1. Create the key once: `scripts/make-android-keystore.sh` (needs Java). Store the output folder in two safe places, such as the committee's Google Drive plus a USB drive. **If it's lost, you can never update the installed app.**
+2. Add three GitHub secrets (repo → Settings → Secrets and variables → Actions): `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` and `ANDROID_KEY_ALIAS`. Their values are in the generated `README-SIGNING.txt`.
+3. Until the secrets are added, CI signs with a throwaway **test** key. Its artifact is named `…TEST-KEY-do-not-distribute`, so don't give that APK to residents.
+
+### Getting the app to residents
+
+- Copy the signed APK to the server as `data/gatepass.apk` (or set `APK_FILE`). Residents then see **📱 Get the Android app** on the sign-in page (Android phones) and under **More**. You can also share the link `https://gate.yoursociety.in/download/gatepass.apk` on the society WhatsApp group.
+- iPhone residents: **Share → Add to Home Screen** works today. For a real iPhone app, use TestFlight (needs a Mac and an Apple Developer account, $99/year).
+- Other options: Google Play internal/closed testing ($25 once) gives automatic installs and updates.
+
+Before publishing, change the app ID `com.gatepass.society` in `capacitor.config.js` (plus `applicationId` in `android/app/build.gradle` and the Bundle Identifier in Xcode). To change the icon or splash screen, edit `resources/icon.svg` and run `node scripts/make-native-assets.js`.
 
 ### Push notifications in the apps
 
@@ -92,6 +110,6 @@ Node.js + Express, the SQLite built into Node, and plain HTML/CSS/JS on the fron
 server/        app.js (auth: cookie for web, bearer token for apps; CORS), db.js, routes/, fcm.js + apns.js (native push)
 public/        index.html, app.js (all screens, phone→desktop), styles.css, sw.js (PWA offline + push)
 android/ ios/  native app projects (Capacitor)
-scripts/       build-mobile.js (bundles public/ for the apps), make-native-assets.js (icons/splash)
+scripts/       build-mobile.js (prepares the apps), make-native-assets.js (icons/splash), make-android-keystore.sh
 test/          API tests (node --test)
 ```

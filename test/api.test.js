@@ -190,3 +190,11 @@ test('native apps: bearer token login, CORS preflight and token-authenticated SS
   assert.equal(reg.status, 200);
   assert.equal(db.get('SELECT platform FROM native_push_tokens WHERE token = ?', 'fcm-device-token-123').platform, 'android');
 });
+
+test('screens are revalidated on every load so app updates reach phones at once', async () => {
+  for (const f of ['/', '/app.js', '/styles.css']) {
+    assert.equal((await fetch(base + f)).headers.get('cache-control'), 'no-cache', f);
+  }
+  assert.equal((await fetch(`${base}/download/gatepass.apk`)).status, 404, 'no APK uploaded yet');
+  assert.equal((await (await fetch(`${base}/api/config`)).json()).androidApp, false);
+});

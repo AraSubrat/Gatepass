@@ -7,8 +7,11 @@ const Cap = window.Capacitor;
 const NATIVE = Boolean(Cap?.isNativePlatform?.());
 const PLATFORM = Cap?.getPlatform?.() || 'web';
 const Plugins = Cap?.Plugins || {};
-// In the native apps the pages are bundled, so API calls go to the society's server (set at build time in config.js).
-const API_BASE = NATIVE ? String(window.GATEPASS_SERVER || '').replace(/\/$/, '') : '';
+// Native apps either load these screens straight from the society's server ("live" mode: same origin, so
+// API_BASE is empty) or carry them bundled inside the app, served from a local origin ("bundled" mode:
+// API calls go to the server address baked into config.js at build time).
+const BUNDLED = NATIVE && /^(capacitor|https?):\/\/localhost$/.test(location.origin); // iOS / Android local origins
+const API_BASE = BUNDLED ? String(window.GATEPASS_SERVER || '').replace(/\/$/, '') : '';
 document.documentElement.classList.add(`platform-${PLATFORM}`);
 
 // Native apps keep the session token in secure-ish app storage (web uses an HttpOnly cookie instead).
@@ -244,6 +247,8 @@ route('/login', async () => html`
     </form>
     <p class="center">New resident? <a href="#/register">Create an account</a></p>
     <p class="center small muted">Forgot your password? Ask the committee to reset it.</p>
+    ${!NATIVE && state.config.androidApp && /android/i.test(navigator.userAgent)
+      ? html`<a class="btn ghost block" href="${API_BASE}/download/gatepass.apk">📱 Get the Android app</a>` : ''}
   </div>`, { public: true });
 
 forms.login = async (d) => {
@@ -642,6 +647,13 @@ route('/more', async () => {
         <button class="btn soft block" type="submit">Change password</button>
       </form>
     </div>
+    ${!NATIVE && state.config.androidApp ? html`
+      <h2>Phone app</h2>
+      <div class="card">
+        <p class="small">Install the Gatepass app on Android. iPhone users: use <b>Share → Add to Home Screen</b>.</p>
+        <a class="btn" href="/download/gatepass.apk">📱 Download Android app</a>
+        <p class="hint">If Android asks, allow installing from this browser. Updates to the app's screens arrive automatically.</p>
+      </div>` : ''}
     <button class="btn ghost block" data-action="logout">Sign out</button>
     ${!standalone ? html`<p class="hint center">Tip: add Gatepass to your home screen for one-tap access.</p>` : ''}`;
 }, { tab: '/more', narrow: true });
@@ -1020,7 +1032,7 @@ route('/admin/bookings', async () => {
 
 // ---------- Boot ----------
 async function boot() {
-  if (NATIVE && !API_BASE) {
+  if (BUNDLED && !API_BASE) {
     $('#view').innerHTML = '<div class="card"><p class="error">This app was built without a server address. Rebuild with GATEPASS_SERVER_URL set.</p></div>';
     return;
   }
